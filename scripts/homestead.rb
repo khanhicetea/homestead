@@ -10,11 +10,18 @@ class Homestead
     config.ssh.shell = "bash -c 'BASH_ENV=/etc/profile exec bash'"
 
     # Configure The Box
-    config.vm.box = "laravel/homestead"
+    config.vm.box = settings["box"] ||= "laravel/homestead"
     config.vm.hostname = settings["hostname"] ||= "homestead"
 
     # Configure A Private Network IP
     config.vm.network :private_network, ip: settings["ip"] ||= "192.168.10.10"
+
+    # Configure Additional Networks
+    if settings.has_key?("networks")
+      settings["networks"].each do |network|
+        config.vm.network network["type"], ip: network["ip"], bridge: network["bridge"] ||= nil
+      end
+    end
 
     # Configure A Few VirtualBox Settings
     config.vm.provider "virtualbox" do |vb|
@@ -34,6 +41,14 @@ class Homestead
         v.vmx["numvcpus"] = settings["cpus"] ||= 1
         v.vmx["guestOS"] = "ubuntu-64"
       end
+    end
+
+    # Configure A Few Parallels Settings
+    config.vm.provider "parallels" do |v|
+      v.update_guest_tools = true
+      v.optimize_power_consumption = false
+      v.memory = settings["memory"] ||= 2048
+      v.cpus = settings["cpus"] ||= 1
     end
 
     # Standardize Ports Naming Schema
@@ -58,14 +73,14 @@ class Homestead
     # Use Default Port Forwarding Unless Overridden
     default_ports.each do |guest, host|
       unless settings["ports"].any? { |mapping| mapping["guest"] == guest }
-        config.vm.network "forwarded_port", guest: guest, host: host
+        config.vm.network "forwarded_port", guest: guest, host: host, auto_correct: true
       end
     end
 
     # Add Custom Ports From Configuration
     if settings.has_key?("ports")
       settings["ports"].each do |port|
-        config.vm.network "forwarded_port", guest: port["guest"], host: port["host"], protocol: port["protocol"]
+        config.vm.network "forwarded_port", guest: port["guest"], host: port["host"], protocol: port["protocol"], auto_correct: true
       end
     end
 
@@ -91,16 +106,29 @@ class Homestead
     # Register All Of The Configured Shared Folders
     if settings.include? 'folders'
       settings["folders"].each do |folder|
-        mount_opts = folder["type"] == "nfs" ? ['actimeo=1'] : []
+        mount_opts = []
+
+        if (folder["type"] == "nfs")
+            mount_opts = folder["mount_opts"] ? folder["mount_opts"] : ['actimeo=1']
+        end
+
         config.vm.synced_folder folder["map"], folder["to"], type: folder["type"] ||= nil, mount_options: mount_opts
       end
     end
 
     # Install All The Configured Nginx Sites
+    config.vm.provision "shell" do |s|
+        s.path = scriptDir + "/clear-nginx.sh"
+    end
+
+
     settings["sites"].each do |site|
       config.vm.provision "shell" do |s|
           if (site.has_key?("hhvm") && site["hhvm"])
             s.path = scriptDir + "/serve-hhvm.sh"
+            s.args = [site["map"], site["to"], site["port"] ||= "80", site["ssl"] ||= "443"]
+          elsif (site.has_key?("type") && (site["type"] == "symfony" || site["type"] == "symfony2"))
+            s.path = scriptDir + "/serve-symfony2.sh"
             s.args = [site["map"], site["to"], site["port"] ||= "80", site["ssl"] ||= "443"]
           else
             s.path = scriptDir + "/serve.sh"
@@ -125,6 +153,10 @@ class Homestead
     end
 
     # Configure All Of The Server Environment Variables
+    config.vm.provision "shell" do |s|
+        s.path = scriptDir + "/clear-variables.sh"
+    end
+
     if settings.has_key?("variables")
       settings["variables"].each do |var|
         config.vm.provision "shell" do |s|
@@ -133,7 +165,7 @@ class Homestead
         end
 
         config.vm.provision "shell" do |s|
-            s.inline = "echo \"\n#Set Homestead environment variable\nexport $1=$2\" >> /home/vagrant/.profile"
+            s.inline = "echo \"\n# Set Homestead Environment Variable\nexport $1=$2\" >> /home/vagrant/.profile"
             s.args = [var["key"], var["value"]]
         end
       end
